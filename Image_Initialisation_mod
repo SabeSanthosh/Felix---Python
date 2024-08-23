@@ -1,0 +1,21 @@
+
+import numpy as np
+
+def ImageMaskInitialisation(IErr,
+                            IPixelCount):
+    
+    IPixelTotal=0
+    
+    IPixelTotal=(2*IPixelCount)**2
+    print(IPixelTotal)
+    
+    IPixelLocations=np.zeros((IPixelTotal,2))
+    
+    IPixelTotal=0
+    for i in range(0,2*IPixelCount):
+        for j in range(0,2*IPixelCount):
+            IPixelTotal=IPixelTotal+1
+            IPixelLocations[IPixelTotal-1,0]=i
+            IPixelLocations[IPixelTotal-1,1]=j
+    
+    return IPixelLocations,IPixelTotal
