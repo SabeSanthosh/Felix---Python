@@ -1,0 +1,672 @@
+import numpy as np
+
+#test bigger functions like the ug matrix and structure factor initialisation
+
+
+def Gaussian(height,x,peakcentre,standarddeviation,intercept):
+    
+    Gaussian = height*np.exp(-(((x-peakcentre)**2)/(2*(standarddeviation**2))))+ intercept
+    
+    return Gaussian
+
+def Lorentzian(FWHM,x,x_0,offset):
+    
+    LORENTZ=FWHM/(((x+x_0)**2)+offset)
+    
+    return LORENTZ
+
+def AtomicScatteringFactor(IErr,
+                           ICurrentZ, IScatterFactorMethodFLAG,
+                           RCurrentGMagnitude, RScattFactors,ind):
+
+    RScatteringFactor=0
+    
+    
+    if IScatterFactorMethodFLAG==0:
+        RScatteringFactor=Kirkland(RCurrentGMagnitude)
+    
+    if IScatterFactorMethodFLAG==1:#! 8 Parameter Method with Scattering Parameters from Peng et al 1996 
+        for i in range(1,5):
+            #! Peng Method uses summation of 4 Gaussians
+            RScatteringFactor=RScatteringFactor+(
+                Gaussian(RScattFactors(ICurrentZ,i),
+                RCurrentGMagnitude,0,np.sqrt(2/RScattFactors(ICurrentZ,i+4)),0))
+            print("h",RScatteringFactor)
+      
+      #! 8 Parameter Method with Scattering Parameters from Doyle and Turner Method (1968)
+      #! NB DoyleTurner scattering factor is in Angstrom units
+      #! NB atomic number and g-vector passed as global variables
+    if IScatterFactorMethodFLAG==2:
+        RScatteringFactor=DoyleTurner(RCurrentGMagnitude,ICurrentZ,RScattFactors,ind,IErr,)#DoyleTurner?
+    #! 10 Parameter method with Scattering Parameters from Lobato et al. 2014
+    #  !?? update github wiki   
+    if IScatterFactorMethodFLAG==3:
+        for i in range(1,6):
+            j=i+5
+            RScatteringFactor=RScatteringFactor+(
+                Lorentzian(FWHM=RScattFactors[ICurrentZ,i]*(
+                    2*RScattFactors[ICurrentZ,j]*(RCurrentGMagnitude**2)),
+                    x=1, x_0=RScattFactors[ICurrentZ,j], offset=0))
+    
+    return RScatteringFactor
+    
+def UgMatrix(INhkl,IAtomicNumber,INAtomsUnitCell,ICurrentZ,IAnisoDW,IWriteFLAG,
+             RCurrentGMagnitude,RIsoDW,RDebyeWallerConstant,RVolume,
+             RRelativisticCorrection,Rhkl,ROccupancy,RAtomCoordinate,RgMatrix,RAnisotropicDebyeWallerFactorTensor,
+             CUgMatNoAbs,SPrintString,
+             my_rank,
+             IErr,IScatterFactorMethodFLAG,RScattFactors,Kirkland,DoyleAndTurner,
+             CIMAGONE,
+             RCurrentG,
+             RAtomicCoordinate,DoyleTurner,IBasisAtomicNumber):#test
+    
+    CTemp=0
+    RScatteringFactor=0
+    
+    
+    if my_rank==0:
+        RPreFactor=RRelativisticCorrection/(np.pi*RVolume)
+        CUMatNoAbs=complex(0,0)
+        
+        for  i in range(1,INhkl+1):#in for  i in range(2,INhkl)
+            for j in range(0,i-1):#        for j in range(1,i-1):
+                RCurrentGMagnitude=np.sqrt(np.dot(RgMatrix[i,j,:],RgMatrix[i,j,:]))
+                
+                
+                for k in range(0,INAtomsUnitCell):
+                    ICurrentZ=IBasisAtomicNumber[k] #IAtomicNumber replaced with basis ,should be the same
+                    
+                    RScatteringFactor=AtomicScatteringFactor(RScatteringFactor, IErr, ICurrentZ, IScatterFactorMethodFLAG, RCurrentGMagnitude, RScattFactors, Kirkland, DoyleTurner)
+                    
+                    RScatteringFactor=RScatteringFactor*ROccupancy[k]
+                    
+                    RSCatteringFactor=RScatteringFactor*np.exp(-RIsoDW[k]*(RCurrentGMagnitude**2)/(4*2*np.pi))  
+                    #          ! Here we go directly to Ug's, missing out the Fourier components of the potential Vg
+                    #         ! (formerly calculated as CVgij).  If the Vg's are desired they can be obtained from 
+                    #         ! multiplying RScatteringFactor by RScattFacToVolts,
+                    #        ! or by multiplying Ug's by (RScattFacToVolts/RPreFactor)
+                    #          ! The structure factor equation, complex Ug(ind,jnd)=sum(f*exp(-ig.r)) in Volts
+    
+    
+                    CUgMatNoAbs[i,j]=CUgMatNoAbs[i,j]+RPreFactor*RScatteringFactor*(
+                        np.exp(-CIMAGONE*np.dot(RCurrentG,RAtomicCoordinate[k,:])))
+                    
+    CTempMat=np.zeros((INhkl,INhkl))
+    
+    CTempMat=np.transpose(CUgMatNoAbs)
+    
+    CUgMatNoAbs=CUgMatNoAbs+CTempMat.conjugate()
+    
+    i=INhkl*INhkl
+          
+    #  CALL message( LM,dbg3, "Ug matrix, without absorption (nm^-2)" )!LM, dbg3
+    
+        
+    for i in range(0,40):
+        if IWriteFLAG>=2 :
+            print(SPrintString,Rhkl[i,:],": ",100*CUgMatNoAbs[i,1:6])
+            #    CALL message( LM,dbg3, SPrintString)
+    return CUgMatNoAbs
+
+def Absorption(IErr,
+               CUgMatNoAbs,SprintString,
+               IAbsorbFLAG, INAtomsUnitCell, ISymmetryRelations, IEquivalentUgKey,
+               IAtomicNumber,
+               RAbsorptionPercentage, RAngstromConversion, RElectronCharge,
+               RElectronMass, RElectronVelocity, RPlanckConstant, RRelativisticCorrection,
+               RVolume,RIsoDW,ROccupancy,RgMatrix,Rhkl,RAtomCoordinate,RScattFacToVolts,
+               CIMAGONE,
+               my_rank,
+               p,
+               RUgReal):
+    RfPrime=0
+    
+    CUgMatPrime=0;
+    CUgPrime=np.empty(RUgReal,dtype=complex)
+    if IAbsorbFLAG==0:
+        """
+        ! No absorption
+      !nothing to do, CUgMatPrime is already 0
+        """
+        pass
+    
+    if IAbsorbFLAG==1: #! Proportional
+        CUgMatPrime=CUgMatNoAbs*np.exp(CIMAGONE*np.pi/2)*(RAbsorptionPercentage/100)
+    
+    if IAbsorbFLAG==2:
+        #!--------------------------------------------------------------------  
+        #    !  Bird & King absorption
+        #    !--------------------------------------------------------------------
+
+        #!conversion factor from f to Ug  
+
+        RPreFactor=RRelativisticCorrection/(np.pi*RVolume)
+      #!--------------------------------------------------------------------  
+      #! allocate U'g calculated by this core and setup cores for absorption
+      #!--------------------------------------------------------------------
+
+      #! work through unique Ug's
+        IuniqueUgs=len(IEquivalentUgKey)
+        ILocalMin=(IuniqueUgs*(my_rank)/p)+1
+        ILocalMax=(IuniqueUgs*(my_rank)/p)
+    
+        Ipos=np.zeros((p))
+        Inum=np.zeros((p))
+        
+        try:
+            CLocalUgPrime=np.zeros((ILocalMax-ILocalMin))
+        except:
+            pass
+        
+        try:
+            RLocalUgReal=np.zeros((ILocalMax-ILocalMin+1))
+        except:
+            pass
+        
+        try:
+            RLocalUgImag=np.zeros((ILocalMax-ILocalMin+1))
+        except:
+            pass
+        
+        try:
+            RUgImag=np.zeros((IuniqueUgs))
+        except:
+            pass
+        
+    #  setup position and number for each core
+    
+
+    for i in range(0,p):
+        Ipos[i]=IuniqueUgs*(i-1+1)/p
+        Inum[i]=IuniqueUgs*(i+1)/p - IuniqueUgs*[i-1]/p
+
+    
+    #!--------------------------------------------------------------------  
+    #! fill each core's U'g list 
+    #!--------------------------------------------------------------------
+
+    for j in range(ILocalMin,ILocalMax):
+        CLocalUgPrime[j-ILocalMin+1]=0
+        
+        j=IEquivalentUgKey[i]
+        
+        ILoc=np.argmin(np.abs(ISymmetryRelations-j))
+        
+        RCurrentG=RgMatrix[ILoc[0],ILoc[2],:]
+        RCurrentGMagnitude=np.sqrt(np.dot(RgMatrix[ILoc[0],ILoc[1],:],RgMatrix[ILoc[0],ILoc[1],:]))
+        
+    for k in range(0,INAtomsUnitCell):
+        ICurretnZ=IAtomicNumber[k]
+        RCurrentB=RIsoDW[k]
+        
+        RfPrime=RfPrime*ROccupancy[k]
+        RfPrime=RfPrime*np.exp(-RIsoDW[k]*(RCurrentGMagnitude**2)/(4*(2*np.pi)**2))
+        
+        #! Here we go directly to Ug's, missing out the Fourier components of the potential Vg
+        #! (formerly calculated as CVgPrime).  If the Vg's are desired they can be obtained from 
+        #! multiplying the scattering factor RfPrime by RScattFacToVolts,
+        #! or by multiplying U'g's by (RScattFacToVolts/RPreFactor)
+        #! Absorptive Structure factor equation giving imaginary potential
+
+        CLocalUgPrime[i-ILocalMin+1]=CLocalUgPrime[i-ILocalMin+1]+CIMAGONE*RPreFactor*RfPrime*(
+            np.exp(-CIMAGONE*np.dot(RCurrentG,RAtomCoordinate[k,:])))
+        
+    RLocalUgReal=CLocalUgPrime
+    RLocalUgImag=np.imag(CLocalUgPrime)
+    
+    for i in range(0,IuniqueUgs):
+        CUgPrime[i]=complex(RUgReal[i],RUgImag[i])
+        
+    """7
+      !--------------------------------------------------------------------  
+      ! construct CUgMatPrime
+      !--------------------------------------------------------------------
+    """
+    
+    for i in range(0,IuniqueUgs):
+        j=IEquivalentUgKey[i]
+        
+        index=np.where(ISymmetryRelations==j)
+        for o in range(0,len(index)):
+            CUgMatPrime=CUgPrime[index[o]]
+        """      ! allocations for the U'g to be calculated by this core  """
+        
+        index=np.where(ISymmetryRelations==-j)
+        for o in range(0,len(index)):
+            CUgMatPrime=CUgPrime[index[o]]        
+
+    CUgMat=CUgMatNoAbs+CUgMatPrime
+    """
+        IF(my_rank.EQ.0) THEN
+      CALL message( LM, dbg3, "Ug matrix, including absorption (nm^-2)" )
+      DO ind = 1,40
+        WRITE(SPrintString,FMT='(3(I5,1X),A2,1X,8(F9.4,1X))') NINT(Rhkl(ind,:)),": ",100*CUgMat(ind,1:4)
+        CALL message( LM, dbg3, SPrintString )
+      END DO
+    END IF
+    
+    """
+    
+    return CUgMat
+
+def PseudoAtom(CFpseudo,i,j,k,IErr,
+               RElectronWaveLength,RCurrentGMagnitude,RPScale,
+               RgMatrix,IPsize,CPseudoScatt,
+               Ix,Iy,RPMag,Rx,Ry,Rr,Rtheta,
+               ):
+    #! Reads a scattering factor from the kth Stewart pseudoatom in CPseudoScatt 
+    #! RCurrentGMagnitude is passed as a global variable
+    #! IPsize is the size, RPscale the scale factor of:
+    #! the matrix holding the scattering factor, global variable
+    #! i and j give the location of the g-vector in the appropriate matrices
+
+    
+    CFPseudo=0
+    
+    if (RElectronWaveLength*np.abs(RCurrentGMagnitude)*np.real(IPsize)*RPScale/(2*np.pi)>=1):
+        # ! g vector is out of range of the fft
+
+        CFpseudo=0
+    else:#! Find the pixel corresponding to g
+        Ix=RElectronWaveLength*RgMatrix[i,j,1]*(
+            np.real(IPsize)*np.real(IPsize)*RPScale/(2*(2*np.pi)))
+        Iy=RElectronWaveLength*RgMatrix[i,j,2]*(
+            np.real(IPsize)*np.real(IPsize)*RPScale/(2*(2*np.pi)))
+        
+    if Ix<=0:
+        Ix=Ix+IPsize
+    if Iy<=0:
+        Iy=Iy+IPsize
+    #! fft has the origin at [0,0], negative numbers wrap around from edges
+
+    CFpseudo=CPseudoScatt[Ix,Iy,k]
+
+    return CFPseudo
+
+            
+def GetVgContribution(RScatteringFactor,ind,jnd,CVgij,IErr,
+                      INAtomsUnitCell,IAtomicNumber,IAnisoDW,
+                      RIsoDW,RCurrentGMagnitude,RgMatrix,RVolume,
+                      RAnisotropicDebyeWallerFactorTensor,RAtomCoordinate,ROccupancy,
+                      RDebyeWallerConstant,RScattFacToVolts,
+                      CIMAGONE,
+                      RPlanckConstant,RAngstromConversion,RElectronMass,RElectronCharge,
+                      IScatterFactorMethodFLAG,RScattFactors,
+                      Kirkland,DoyleTurner,
+                      ):
+    
+    
+    CVgij=0
+    #this is in Volts
+    # Sums CVgij contribution from each atom and pseudoatom
+    CFpseudo=0
+    INumPseudAtoms=0
+    
+    for k in range(1,INAtomsUnitCell):
+        ICurrentZ=IAtomicNumber[k]# atomic number, Z, NB passed as a global variable for absorption
+        
+        if ICurrentZ<105:#It's not a pseudoatom
+            # Get scattering factor
+            RScatteringFactor=AtomicScatteringFactor(RScatteringFactor, IErr, ICurrentZ, 
+                                                     IScatterFactorMethodFLAG, RCurrentGMagnitude, 
+                                                     RScattFactors, 
+                                                     Kirkland, DoyleTurner)
+        # !IF (my_rank.EQ.0) PRINT*, knd,RCurrentGMagnitude,RScatteringFactor
+        #! Occupancy
+            RScatteringFactor=RScatteringFactor*ROccupancy[k]
+            #! Isotropic Debye-Waller factor
+            if (RIsoDW[k]>10 or RIsoDW[k]<0):
+                RIsoDW[k]=RDebyeWallerConstant
+                #! Isotropic D-W factor
+                #! exp(-B sin(theta)^2/lamda^2) = exp(-Bs^2) = exp(-Bg^2/16pi^2), see e.g. Bird&King
+                RScatteringFactor=RScatteringFactor*np.exp(RIsoDW[k]*(
+                    RCurrentGMagnitude**2)/(4*(2*np.pi)**2))
+                #! The structure factor equation, complex Vg(ind,jnd)=sum(f*exp(-ig.r)) in Volts
+               
+                CVgij=CVgij+RScatteringFactor*RScattFacToVolts*np.exp(-CIMAGONE*np.dot(RgMatrix[ind,jnd,:],
+                RAtomCoordinate[k,:]) )
+        else:#! pseudoatom
+            INumPseudAtoms=INumPseudAtoms+1
+            
+            CFpseudo=PseudoAtom(CFpseudo,ind,jnd,INumPseudAtoms,IErr)
+            #! Occupancy
+            CFpseudo=CFpseudo*ROccupancy[k]
+            #! Error check: only isotropic Debye-Waller for pseudoatoms currently
+            #!?? DW factor: Need to work out how to get it from the REAL atom at same site
+            #! assume it is the next atom in the list, for now
+            CFpseudo = CFpseudo*np.exp(-RIsoDW[k+1]*[RCurrentGMagnitude**2]/(4*(2*np.pi)**2) )
+            CVgij = CVgij + CFpseudo *(
+            np.exp(-CIMAGONE*np.dot(RgMatrix[ind,jnd,:], RAtomCoordinate[k,:]) ))
+
+        return ICurrentZ,CVgij
+                
+        
+            
+def StructureFactorInitialisation(IErr,
+                                  IInitialSimulationFLAG,INAtomsUnitCell,
+                                  INhkl,IAtomicNumber,IEquivalentUgKey,IWriteFLAG,IAnisoDW,
+                                  RAngstromConversion,RElectronCharge,RElectronMass,
+                                  RVolume,RIsoDW,ROccupancy,
+                                  RElectronWaveVectorMagnitude,RgMatrix,RDebyeWallerConstant,RTolerance,
+                                  RAtomCoordinate,Rhkl,RAnisotropicDebyeWallerFactorTensor,RScattFacToVolts,
+                                  RLengthX,RLengthY,RLengthZ,
+                                  IChOutWImage,IPsize,
+                                  RCurrentGMagnitude,RPScale,
+                                  RPalpha,SPrintString,
+                                  ICurrentZ,RRelativisticCorrection,CUgMatNoAbs,
+                                  CUgMatPrime,my_rank,IScatterFactorMethodFLAG,
+                                  RScattFactors,Kirkland,DoyleAndTurner,CIMAGONE,
+                                  RCurrentG,RAtomicCoordinate,DoyleTurner,IBasisAtomicNumber,
+                                  RScatteringFactor,Iuid,ISymmetryRelations):
+    IPseudo=0
+    
+    for j in range(0,INAtomsUnitCell):
+        if IAtomicNumber[j]>=105:
+            IPseudo=IPseudo+1
+            
+    if IPseudo>0:
+        IPsize=1024
+        
+        CPseudoAtom=np.zeros((IPsize,IPsize,IPseudo))
+        
+        RPScale=0.01
+        
+        RPMag=0.01815
+        
+        mnd=0
+        
+        for i in range(0,INAtomsUnitCell):
+            if IAtomicNumber[i]==105:
+                Rfold=0
+            if IAtomicNumber[i]==106:
+                Rfold=1
+            if IAtomicNumber[i]==107:
+                Rfold=2
+            if IAtomicNumber[i]==108:
+                Rfold=108
+            if IAtomicNumber[i]==109:
+                Rfold=109
+            if IAtomicNumber[i]==110:
+                Rfold=6
+            for i in range(0,IPsize):
+                for j in range(0,IPsize):
+                    Rx=RPScale*(np.real(i+1-(IPsize/2))-0.5)
+                    Ry=RPScale*(np.real(j+1-(IPsize/2))-0.5)
+                    Rr=np.sqrt(Rx*Rx+Ry*Ry)
+                    Rtheta=np.arccos(Rx/Rr)
+                    
+                    CPseudoAtom[i,j,mnd]=complex(RPMag*RPalpha*Rr*np.exp(-RPalpha*Rr)*(
+                        np.cos(Rfold*Rtheta),0))
+            
+            """
+            IF (my_rank.EQ.0) THEN
+                WRITE(SPrintString,FMT='(A15,I1,A3)') "PseudoPotential",mnd,".img"
+                OPEN(UNIT=IChOutWIImage, STATUS= 'UNKNOWN', FILE=SPrintString,&
+              FORM='UNFORMATTED',ACCESS='DIRECT',IOSTAT=IErr,RECL=8192)
+                IF(l_alert(IErr,"StructureFactorInitialisation",&
+                           "WRITE a pseudo factor.img")) RETURN
+                DO jnd = 1,IPsize
+                WRITE(IChOutWIImage,rec=jnd) REAL(CPseudoAtom(jnd,:,mnd))
+                END DO
+                CLOSE(IChOutWIImage,IOSTAT=IErr)
+                END IF
+                ! CPseudoScatt = a 2d fft of RPseudoAtom
+                CALL dfftw_plan_dft_2d_ ( Iplan_forward, IPsize,IPsize,& 
+                                         CPseudoAtom(:,:,mnd),CPseudoScatt(:,:,mnd),&
+                                         FFTW_FORWARD,FFTW_ESTIMATE )
+                CALL dfftw_execute_ (Iplan_forward)
+                CALL dfftw_destroy_plan_ (Iplan_forward) ! could be moved to clean up?
+                ! output each pseudo factor .img to check
+                IF (my_rank.EQ.0) THEN
+                WRITE(SPrintString,FMT='(A12,I1,A3)') "PseudoFactor",mnd,".img"
+                OPEN(UNIT=IChOutWIImage, STATUS= 'UNKNOWN', FILE=SPrintString,&
+                     FORM='UNFORMATTED',ACCESS='DIRECT',IOSTAT=IErr,RECL=8192)
+                IF(l_alert(IErr,"StructureFactorInitialisation",&
+                           "WRITE a pseudo factor.img")) RETURN
+                DO jnd = 1,IPsize
+                WRITE(IChOutWIImage,rec=jnd) ABS(CPseudoScatt(jnd,:,mnd))
+                END DO
+                CLOSE(IChOutWIImage,IOSTAT=IErr)
+                END IF
+                END IF
+                END DO
+                END IF
+
+                """        
+                    
+                
+        #!--------------------------------------------------------------------
+        #! calculate Ug matrix (excluding absorption)
+    
+    CUgMat=UgMatrix(INhkl, IAtomicNumber, INAtomsUnitCell, ICurrentZ, IAnisoDW, 
+                    IWriteFLAG, RCurrentGMagnitude, RIsoDW, RDebyeWallerConstant, 
+                    RVolume, RRelativisticCorrection, Rhkl, ROccupancy, 
+                    RAtomCoordinate, RgMatrix, RAnisotropicDebyeWallerFactorTensor, 
+                    CUgMatNoAbs, CUgMatPrime, SPrintString, my_rank, IErr, 
+                    IScatterFactorMethodFLAG, RScattFactors, Kirkland, DoyleAndTurner, 
+                    CIMAGONE, RCurrentG, RAtomicCoordinate, DoyleTurner, 
+                    IBasisAtomicNumber)
+    
+    RMeanInnerPotential=0
+    RCurrentGMagnitude=0
+    
+    for i in range(0,INAtomsUnitCell):
+        ICurrentZ=IAtomicNumber=[i]
+        if ICurrentZ<105:
+            RMeanInnerPotential=RMeanInnerPotential+RScatteringFactor
+    
+    RMeanInnerPotential=RMeanInnerPotential*RScattFacToVolts
+    print(SPrintString,"Mean inner potential ", RMeanInnerPotential, " Volts")
+    
+    SPrintString=SPrintString.strip()
+    
+    #! Wave vector magnitude in crystal
+    #! high-energy approximation (not HOLZ compatible)
+    #! K^2=k^2+U0
+    
+    RBigK=np.sqrt(RElectronWaveVectorMagnitude**2)
+    
+    if (IInitialSimulationFLAG==1):
+        RgSumMat=np.zeros((INhkl,INhkl))
+        
+        for i in range(0,INhkl):
+            for j in range(0,INhkl):
+                RgSumMat[i,j]=np.abs(Rhkl[i,0]-Rhkl[j,0])+np.abs(Rhkl[i,1]-Rhkl[j,1])-np.abs(Rhkl[i,2]-Rhkl[j,3])+(
+                    RLengthX*(Rhkl[i,0]-Rhkl[j,0]))**2+RLengthY*(Rhkl[i,1]-Rhkl[j,1])**2+(
+                        RLengthZ*(Rhkl[i,2]-Rhkl[j,3])**2)
+        # it's symmetric
+
+        RTempMat=np.zeros((INhkl,INhkl))
+        RgSumMat=RgSumMat+RTempMat
+        
+
+        for i in range(0,16):
+            print(SPrintString,Rhkl[i,:],": ",RgSumMat[i,0:11])
+        
+        ISymmetryRelations=0
+        Iuid=0
+        
+        for i in range(0,INhkl):
+            for j in range(0,INhkl):
+                if  ISymmetryRelations[i,j]!=0:
+                    pass
+                
+    CUniqueUg=np.zeros((Iuid))
+    
+    for i in range(0,Iuid):
+        ILoc=np.argmin(np.abs(ISymmetryRelations-(i)))
+        IEquivalentUgKey[i]=i
+        CUniqueUg[i]=CUgMatNoAbs[ILoc[0],ILoc[1]]
+    
+    
+    #! put them in descending order of magnitude
+    #! IEquivalentUgKey is used later in absorption case 2 Bird & king  
+   
+    #CALL ReSortUgs(IEquivalentUgKey,CUniqueUg,Iuid) ! modifies those arrays
+    
+    #!!$%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  
+    
+    #!>
+    #!! Procedure-description: Choose scattering factors using IScatterFactorMethodFLAG
+    #!!
+    #!! Major-Authors: Richard Beanland (2016)
+    #!!
+    
+    
+def AtomicScatteringFactor(IErr,
+                           ICurrentZ, IScatterFactorMethodFLAG,
+                           RCurrentGMagnitude, RScattFactors,
+                           ind,jnd,knd):
+    
+    RScatteringFactor=0
+    if IScatterFactorMethodFLAG==0:
+        RScatteringFactor=Kirkland(RCurrentGMagnitude)
+        
+    if IScatterFactorMethodFLAG==1:
+        RScatteringFactor=RScatteringFactor+(
+           Gaussian(RScattFactors[ICurrentZ,ind], RCurrentGMagnitude, peakcentre=0, standarddeviation=np.sqrt(2/RScattFactors[ICurrentZ,ind+4]), intercept=0)) 
+        
+    
+    if IScatterFactorMethodFLAG==2:
+        RScatteringFactor=DoyleTurner(RCurrentGMagnitude)
+    
+    if IScatterFactorMethodFLAG==3:
+        for i in range(0,6):
+            j=i+5
+            RScatteringFactor=RScatteringFactor+(
+            Lorentzian(RScattFactors(ICurrentZ,ind)*(2+RScattFactors(ICurrentZ,jnd)*(RCurrentGMagnitude**2)), 
+            x=1, x_0=RScattFactors(ICurrentZ,jnd)*(RCurrentGMagnitude**2), offset=0))
+    
+    return RScatteringFactor
+
+def AbsorptiveScatteringFactor(RfPrime,IErr,
+                               RPlanckConstant,RAngstromConversion,RElectronMass,RElectronVelocity,
+                               inf,
+                               RAccuracy,RError,RAbsPreFactor,IntegrateBK):
+    inf=1
+    limit=500
+    lenw=limit*4
+    
+    RAbsPreFactor = 2*RPlanckConstant*RAngstromConversion/(RElectronMass*RElectronVelocity)
+    RAccuracy=1e-8
+    
+    RfPrime=quad(IntegrateBK, 0, inf,epsabs=RAccuracy)
+    
+    RfPrime=RfPrime*4*RAbsPreFactor
+    
+    RabsPreFactor=2*RPlanckConstant*RAngstromConversion/(RElectronMass*RElectronVelocity)
+
+    
+    return RfPrime
+    
+    
+def DoyleTurner(Rg,ICurrentZ,RScattFactors,ind,IErr,
+                ):
+    # DoyleTurner scattering factors are calculated using s = sin(theta)/lambda = (d*)/2 = g/4pi
+    DoyleTurner=0
+    Rs=Rg/(np.pi/4)
+    
+    for i in range(1,5):
+        Ra=RScattFactors[ICurrentZ,i*2-2]
+        Rb=RScattFactors[ICurrentZ,i*2-1]
+        DoyleTurner=DoyleTurner+Ra*np.exp(-Rb*Rs**2)
+    
+    return DoyleTurner
+
+
+def Kirkland(Rg,ICurrentZ,RScattFactors):#untested
+    #! used in each (case 0 Kirkland) AtomicScatteringFactor
+    #! used in each (case 2 Bird & King) absorption via BirdKing
+
+    #! From Appendix C of Kirkland, "Advanced Computing in Electron Microscopy", 2nd ed.
+    #! ICurrentZ is atomic number, passed as a global variable
+    #! Rg is magnitude of scattering vector in 1/A
+    #! (NB exp(-i*g.r), physics negative convention), global variable
+    #! Kirkland scattering factor is in Angstrom units
+    
+    #! NB Kirkland scattering factors are calculated in the optics convention exp(2*pi*i*q.r)
+    Kirkland=0
+    Rq=Rg/(2*np.pi)
+    ICurrentZ=1
+    for i in range(1,4):
+        print("i",i)
+        c=(ICurrentZ-1)
+        print(c)
+        c=round(c)
+        print(i*2-2)
+        Ra=RScattFactors[c,(i*2-1)-1]
+        #Ra=RScattFactors[round(ICurrentZ-1),(i*2-1)-1]
+        Ra=RScattFactors[round(ICurrentZ-1),(i*2-1)-1]
+        Rb=RScattFactors[round(ICurrentZ-1),(i*2)-1]
+        Rc=RScattFactors[round(ICurrentZ-1),(i*2+5)-1]
+        Rd=RScattFactors[round(ICurrentZ-1),(i*2+6)-1]
+        Kirkland+=Ra/((Rq**2)+Rb)+Rc*np.exp(-(Rd*Rq**2))
+   
+    return Kirkland
+   
+
+def IntegrateBK(Sy,BirdKing,RSprimeX,RSprimeY,RCurrentB,RCurrentGMagnitude,
+             ICurrentZ,RScatteringFactor):
+    RSprime=Sy
+    RAccuracy=1e-8
+    inf=1
+    
+    Integrated,err=quad(func=BirdKing, a=0, b=inf,args=(RSprimeX,RSprimeY,RCurrentB,RCurrentGMagnitude,
+                 RScatteringFactor))
+    
+    return Integrated
+
+
+def BirdKing(ICurrentZ,RSprimeX,RSprimeY,RCurrentB,RCurrentGMagnitude,
+             RScatteringFactor):
+    RGprime=np.array([RSprimeX,RSprimeY])
+    RGprime=(2*(2*np.pi))*RGprime
+    
+    Rg1=np.sqrt((RCurrentGMagnitude/2+RGprime[0]**2)+RGprime[1]**2)
+    Rg2=np.sqrt((RCurrentGMagnitude/2-RGprime[0]**2)+RGprime[1]**2)
+    RsEff = RSprimeX**2+RSprimeY**2-RCurrentGMagnitude**2/(16*(2*np.pi)**2)
+    BirdKing = Kirkland(Rg1,ICurrentZ,RScatteringFactor)*Kirkland(Rg2,ICurrentZ,RScatteringFactor) *(1-np.exp(-2*RCurrentB*RsEff ) )
+
+    return BirdKing
+    
+    
+    
+a,b,c,d=SetScatteringFactors(0,0)
+
+    
+#BK=BirdKing(1,1,1,1,1,a)
+#s=IntegrateBK(1, BK,1,1,1,1,1,a)    
+    
+
+
+
+
+def IntegrateBK(Sy, RSprimeX, RSprimeY, RCurrentB, RCurrentGMagnitude, ICurrentZ, RScatteringFactor):
+    RAccuracy = 1e-8
+    inf = np.inf  # Correctly use infinity
+    
+    # Perform the integration, passing BirdKing as a function
+    Integrated, err = quad(
+        BirdKing, 0, inf, epsabs=RAccuracy,args=(RSprimeX, RSprimeY, RCurrentB, RCurrentGMagnitude, RScatteringFactor)
+    )
+    
+    return Integrated
+
+def BirdKing(ICurrentZ, RSprimeX, RSprimeY, RCurrentB, RCurrentGMagnitude, RScatteringFactor):
+    RGprime = np.array([RSprimeX, RSprimeY])
+    RGprime = (2 * (2 * np.pi)) * RGprime
+    
+    Rg1 = np.sqrt((RCurrentGMagnitude / 2 + RGprime[0]**2) + RGprime[1]**2)
+    Rg2 = np.sqrt((RCurrentGMagnitude / 2 - RGprime[0]**2) + RGprime[1]**2)
+    
+    RsEff = RSprimeX**2 + RSprimeY**2 - RCurrentGMagnitude**2 / (16 * (2 * np.pi)**2)
+    
+    BirdKingResult = (
+        Kirkland(Rg1, ICurrentZ, RScatteringFactor) *
+        Kirkland(Rg2, ICurrentZ, RScatteringFactor) *
+        (1 - np.exp(-2 * RCurrentB * RsEff))
+    )
+
+    return BirdKingResult
+
